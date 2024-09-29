@@ -1,6 +1,8 @@
 #define MICROPY_HW_BOARD_NAME       "NUCLEO_H743ZI"
 #define MICROPY_HW_MCU_NAME         "STM32H743"
 
+#define MICROPY_PY_PYB_LEGACY       (0)
+
 #define MICROPY_HW_ENABLE_RTC       (1)
 #define MICROPY_HW_ENABLE_RNG       (1)
 #define MICROPY_HW_ENABLE_ADC       (1)
@@ -10,20 +12,40 @@
 #define MICROPY_HW_HAS_SWITCH       (1)
 #define MICROPY_HW_HAS_FLASH        (1)
 
-#define MICROPY_BOARD_EARLY_INIT    NUCLEO_H743ZI_board_early_init
-void NUCLEO_H743ZI_board_early_init(void);
+// ADDED FL TO ACTIVATE SPI FLASH 
+// Flash storage config
+#define MICROPY_HW_SPIFLASH_ENABLE_CACHE            (1)
+#define MICROPY_HW_ENABLE_INTERNAL_FLASH_STORAGE    (0)
 
 // The board has an 8MHz HSE, the following gives 400MHz CPU speed
 #define MICROPY_HW_CLK_PLLM         (4)
-#define MICROPY_HW_CLK_PLLN         (400)
+#define MICROPY_HW_CLK_PLLN         (200)
 #define MICROPY_HW_CLK_PLLP         (2)
 #define MICROPY_HW_CLK_PLLQ         (4)
 #define MICROPY_HW_CLK_PLLR         (2)
 #define MICROPY_HW_CLK_PLLVCI       (RCC_PLL1VCIRANGE_1)
 #define MICROPY_HW_CLK_PLLVCO       (RCC_PLL1VCOWIDE)
 #define MICROPY_HW_CLK_PLLFRAC      (0)
+// #define MICROPY_HW_CLK_PLLM         (4)
+// #define MICROPY_HW_CLK_PLLN         (480)
+// #define MICROPY_HW_CLK_PLLP         (2)
+// #define MICROPY_HW_CLK_PLLQ         (4)
+// #define MICROPY_HW_CLK_PLLR         (2)
+// #define MICROPY_HW_CLK_PLLVCI       (RCC_PLL1VCIRANGE_1)
+// #define MICROPY_HW_CLK_PLLVCO       (RCC_PLL1VCOWIDE)
+// #define MICROPY_HW_CLK_PLLFRAC      (0)
 
-// The USB clock is set using PLL3
+// PLL2 200MHz for FMC and QSPI.
+#define MICROPY_HW_CLK_PLL2M            (4)
+#define MICROPY_HW_CLK_PLL2N            (200)
+#define MICROPY_HW_CLK_PLL2P            (2)
+#define MICROPY_HW_CLK_PLL2Q            (2)
+#define MICROPY_HW_CLK_PLL2R            (2)
+#define MICROPY_HW_CLK_PLL2VCI          (RCC_PLL2VCIRANGE_2)
+#define MICROPY_HW_CLK_PLL2VCO          (RCC_PLL2VCOWIDE)
+#define MICROPY_HW_CLK_PLL2FRAC         (0)
+
+// The USB clock is set using PLL3, resulting in 48 MHz
 #define MICROPY_HW_CLK_PLL3M        (4)
 #define MICROPY_HW_CLK_PLL3N        (120)
 #define MICROPY_HW_CLK_PLL3P        (2)
@@ -107,3 +129,39 @@ void NUCLEO_H743ZI_board_early_init(void);
 #define MICROPY_HW_ETH_RMII_TX_EN   (pin_G11)
 #define MICROPY_HW_ETH_RMII_TXD0    (pin_G13)
 #define MICROPY_HW_ETH_RMII_TXD1    (pin_B13)
+
+
+// // QSPI flash #1 for storage
+// #define MICROPY_HW_QSPI_PRESCALER           (2) // 100MHz
+// #define MICROPY_HW_QSPIFLASH_SIZE_BITS_LOG2 (27) // 16 mbyte
+// // Reserve 1MiB at the end for compatibility with alternate firmware that places WiFi blob here.
+// #define MICROPY_HW_SPIFLASH_SIZE_BITS       (128 * 1024 * 1024)
+// #define MICROPY_HW_QSPIFLASH_CS             (pin_G6)
+// #define MICROPY_HW_QSPIFLASH_SCK            (pin_B2)
+// #define MICROPY_HW_QSPIFLASH_IO0            (pin_D11)
+// #define MICROPY_HW_QSPIFLASH_IO1            (pin_D12)
+// #define MICROPY_HW_QSPIFLASH_IO2            (pin_E2)
+// #define MICROPY_HW_QSPIFLASH_IO3            (pin_D13)
+
+// #define MICROPY_HW_RCC_QSPI_CLKSOURCE   (RCC_QSPICLKSOURCE_PLL2)
+
+#if (MICROPY_HW_ENABLE_INTERNAL_FLASH_STORAGE == 0)
+// QSPI flash #1 for storage
+#define MICROPY_HW_QSPI_PRESCALER           (2) // 100MHz
+#define MICROPY_HW_QSPIFLASH_SIZE_BITS_LOG2 (27)
+#define MICROPY_HW_SPIFLASH_SIZE_BITS       (128 * 1024 * 1024)
+#define MICROPY_HW_QSPIFLASH_CS             (pin_G6)
+#define MICROPY_HW_QSPIFLASH_SCK            (pin_B2)
+#define MICROPY_HW_QSPIFLASH_IO0            (pin_D11)
+#define MICROPY_HW_QSPIFLASH_IO1            (pin_D12)
+#define MICROPY_HW_QSPIFLASH_IO2            (pin_E2)
+#define MICROPY_HW_QSPIFLASH_IO3            (pin_D13)
+
+// SPI flash #1, block device config
+extern const struct _mp_spiflash_config_t spiflash_config;
+extern struct _spi_bdev_t spi_bdev;
+#define MICROPY_HW_BDEV_SPIFLASH    (&spi_bdev)
+#define MICROPY_HW_BDEV_SPIFLASH_CONFIG (&spiflash_config)
+#define MICROPY_HW_BDEV_SPIFLASH_SIZE_BYTES (MICROPY_HW_SPIFLASH_SIZE_BITS / 8)
+#define MICROPY_HW_BDEV_SPIFLASH_EXTENDED (&spi_bdev)
+#endif
