@@ -10,6 +10,8 @@
 #define LSE_VALUE (32768)
 #define EXTERNAL_CLOCK_VALUE (12288000)
 
+#define HAL_QSPI_MODULE_ENABLED
+
 // Oscillator timeouts in ms
 #define HSE_STARTUP_TIMEOUT (5000)
 #define LSE_STARTUP_TIMEOUT (5000)
