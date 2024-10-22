@@ -12,6 +12,8 @@
 #define MICROPY_HW_HAS_SWITCH       (1)
 #define MICROPY_HW_HAS_FLASH        (1)
 
+#define MICROPY_HW_RTC_USE_LSE      (1)
+
 // ADDED FL TO ACTIVATE SPI FLASH 
 // Flash storage config
 #define MICROPY_HW_SPIFLASH_ENABLE_CACHE            (1)
