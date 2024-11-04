@@ -586,12 +586,19 @@ soft_reset:
     MP_STATE_PORT(pyb_config_main) = MP_OBJ_NULL;
 
     // Run optional frozen boot code.
+    mp_printf(&mp_plat_print, "DEBUG: Checking for frozen boot file\n");
     #ifdef MICROPY_BOARD_FROZEN_BOOT_FILE
+    mp_printf(&mp_plat_print, "DEBUG: Found frozen boot file\n");
     pyexec_frozen_module(MICROPY_BOARD_FROZEN_BOOT_FILE, false);
     #endif
 
     // Run boot.py (or whatever else a board configures at this stage).
+    mp_printf(&mp_plat_print, "DEBUG: State before boot check:\n");
+    mp_printf(&mp_plat_print, "  reset_mode: %u\n", state.reset_mode);
+    mp_printf(&mp_plat_print, "  log_soft_reset: %s\n", state.log_soft_reset ? "true" : "false");
+    mp_printf(&mp_plat_print, "DEBUG: Checking for boot file\n");
     if (MICROPY_BOARD_RUN_BOOT_PY(&state) == BOARDCTRL_GOTO_SOFT_RESET_EXIT) {
+        mp_printf(&mp_plat_print, "DEBUG: Run boot file\n");
         goto soft_reset_exit;
     }
 
@@ -629,6 +636,7 @@ soft_reset:
     // At this point everything is fully configured and initialised.
 
     // Run main.py (or whatever else a board configures at this stage).
+    mp_printf(&mp_plat_print, "DEBUG: Checking for main file\n");
     if (MICROPY_BOARD_RUN_MAIN_PY(&state) == BOARDCTRL_GOTO_SOFT_RESET_EXIT) {
         goto soft_reset_exit;
     }
