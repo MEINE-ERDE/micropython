@@ -1,0 +1,15 @@
+{
+    "deploy": [
+        "../PYBV10/deploy.md"
+    ],
+    "docs": "",
+    "features": [],
+    "images": [
+        "PYBv1_1.jpg"
+    ],
+    "mcu": "stm32f4",
+    "product": "ME FRAME CONTROLLER F405",
+    "thumbnail": "",
+    "url": "",
+    "vendor": "Circulum Vitae GmbH"
+}
