@@ -1,4 +1,4 @@
-USE_MBOOT ?= 0
+USE_MBOOT = 1
 
 # MCU settings
 MCU_SERIES = h7
