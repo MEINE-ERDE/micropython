@@ -126,8 +126,7 @@
 // UART config
 #define MICROPY_HW_UART2_TX         (pin_D5)
 #define MICROPY_HW_UART2_RX         (pin_D6)
-#define MICROPY_HW_UART2_RTS        (pin_D4)
-#define MICROPY_HW_UART2_CTS        (pin_D3)
+
 #define MICROPY_HW_UART3_TX         (pin_D8)
 #define MICROPY_HW_UART3_RX         (pin_D9)
 // #define MICROPY_HW_UART5_TX         (pin_B6)
@@ -163,7 +162,7 @@
 #define MICROPY_HW_USRSW_PRESSED    (1)
 
 // LEDs
-#define MICROPY_HW_LED1             (pin_E3)    // green'
+#define MICROPY_HW_LED1             (pin_D4)    // green'
 // #define MICROPY_HW_LED2             (pin_B7)    // blue
 // #define MICROPY_HW_LED3             (pin_B14)   // red
 #define MICROPY_HW_LED_ON(pin)      (mp_hal_pin_high(pin))
