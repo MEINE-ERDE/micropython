@@ -3,17 +3,21 @@
 #define MICROPY_HW_MCU_NAME "STM32F405RG"
 
 // Feature configuration
-#define MICROPY_HW_HAS_SWITCH (1)
+#define MICROPY_HW_HAS_SWITCH (0) // no need for pyb switches
 #define MICROPY_HW_HAS_FLASH (1)
 #define MICROPY_HW_HAS_MMA7660 (0)
 #define MICROPY_HW_HAS_LCD (0)
-#define MICROPY_HW_ENABLE_RNG (0)
-#define MICROPY_HW_ENABLE_RTC (0)
+#define MICROPY_HW_ENABLE_RNG (1)
+#define MICROPY_HW_ENABLE_RTC (1)
 #define MICROPY_HW_ENABLE_SERVO (0)
-#define MICROPY_HW_ENABLE_DAC (0)
+#define MICROPY_HW_ENABLE_DAC (1)
 #define MICROPY_HW_ENABLE_USB (1)
 #define MICROPY_HW_ENABLE_SDCARD (0)
 
+// HSE in BYPASS mode.
+#define MICROPY_HW_CLK_USE_HSE (1)
+#define MICROPY_HW_CLK_USE_HSI (0)
+#define MICROPY_HW_CLK_USE_BYPASS (1)
 // Clock configuration
 #define MICROPY_HW_CLK_PLLM (12)
 #define MICROPY_HW_CLK_PLLN (336)
@@ -26,11 +30,7 @@
 #define MICROPY_HW_RTC_USE_US (0)
 #define MICROPY_HW_RTC_USE_CALOUT (1)
 
-// HSE in BYPASS mode.
-#define MICROPY_HW_CLK_USE_HSI (0)
-#define MICROPY_HW_CLK_USE_BYPASS (1)
-
-#define MICROPY_HW_UART_REPL PYB_UART_3
+#define MICROPY_HW_UART_REPL PYB_UART_3 // changed for avoiding overlay with 3 -> no wired out though
 #define MICROPY_HW_UART_REPL_BAUD 115200
 
 // UART configuration
@@ -81,10 +81,10 @@
 #define MICROPY_HW_LED_OFF(pin) (mp_hal_pin_low(pin))
 
 // User switch configuration
-#define MICROPY_HW_USRSW_PIN (pin_C3)
-#define MICROPY_HW_USRSW_PULL (GPIO_PULLUP)
-#define MICROPY_HW_USRSW_EXTI_MODE (GPIO_MODE_IT_FALLING)
-#define MICROPY_HW_USRSW_PRESSED (0)
+// #define MICROPY_HW_USRSW_PIN (pin_C3)
+// #define MICROPY_HW_USRSW_PULL (GPIO_PULLUP)
+// #define MICROPY_HW_USRSW_EXTI_MODE (GPIO_MODE_IT_FALLING)
+// #define MICROPY_HW_USRSW_PRESSED (0)
 
 // Bootloader configuration for I2C with Mboot
 #define MBOOT_I2C_PERIPH_ID 1
