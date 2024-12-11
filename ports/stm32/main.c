@@ -634,6 +634,8 @@ soft_reset:
     #endif
 
     // At this point everything is fully configured and initialised.
+    byte *id = (byte *)MP_HAL_UNIQUE_ID_ADDRESS;
+    mp_printf(&mp_plat_print, "MACHINE ID=%02x%02x%02x%02x:%02x%02x%02x%02x:%02x%02x%02x%02x\n", id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7], id[8], id[9], id[10], id[11]);
 
     // Run main.py (or whatever else a board configures at this stage).
     mp_printf(&mp_plat_print, "DEBUG: Checking for main file\n");
@@ -658,7 +660,7 @@ soft_reset:
     #endif
 
 soft_reset_exit:
-
+    mp_printf(&mp_plat_print, "MPY: soft reset exit\n");
     // soft reset
 
     MICROPY_BOARD_START_SOFT_RESET(&state);
