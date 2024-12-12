@@ -226,15 +226,15 @@ int boardctrl_run_boot_py(boardctrl_state_t *state) {
 int boardctrl_run_main_py(boardctrl_state_t *state) {
     bool run_main_py = state->reset_mode != BOARDCTRL_RESET_MODE_SAFE_MODE
         && pyexec_mode_kind == PYEXEC_MODE_FRIENDLY_REPL;
-
     if (run_main_py) {
+        // Change FL: always run an existing main.py
+        const char *main_py = "main.py";
         // Run main.py (or what it was configured to be), if it exists.
-        const char *main_py;
-        if (MP_STATE_PORT(pyb_config_main) == MP_OBJ_NULL) {
-            main_py = "main.py";
-        } else {
-            main_py = mp_obj_str_get_str(MP_STATE_PORT(pyb_config_main));
-        }
+        // if (MP_STATE_PORT(pyb_config_main) == MP_OBJ_NULL) {
+        //     main_py = "main.py";
+        // } else {
+        //     main_py = mp_obj_str_get_str(MP_STATE_PORT(pyb_config_main));
+        // }
         int ret = pyexec_file_if_exists(main_py);
 
         // Take action based on the execution result.
