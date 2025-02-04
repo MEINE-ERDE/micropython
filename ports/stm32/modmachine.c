@@ -114,6 +114,8 @@
     { MP_ROM_QSTR(MP_QSTR_WDT_RESET),           MP_ROM_INT(PYB_RESET_WDT) }, \
     { MP_ROM_QSTR(MP_QSTR_DEEPSLEEP_RESET),     MP_ROM_INT(PYB_RESET_DEEPSLEEP) }, \
     { MP_ROM_QSTR(MP_QSTR_SOFT_RESET),          MP_ROM_INT(PYB_RESET_SOFT) }, \
+    { MP_ROM_QSTR(MP_QSTR_micropythonCommit), MP_ROM_PTR(&machine_micropython_commit_obj) }, \
+    { MP_ROM_QSTR(MP_QSTR_MEcommit), MP_ROM_PTR(&machine_ME_commit_obj) },
 
 static uint32_t reset_cause;
 
@@ -415,3 +417,27 @@ static void mp_machine_deepsleep(size_t n_args, const mp_obj_t *args) {
 static mp_int_t mp_machine_reset_cause(void) {
     return reset_cause;
 }
+
+// --- Begin new commit hash functions ---
+
+#ifndef MICROPY_ME_FRAME_GIT_HASH
+#define MICROPY_ME_FRAME_GIT_HASH "<no ME_FRAME commit>"
+#endif
+
+#ifndef MICROPY_ME_BASE_GIT_HASH
+#define MICROPY_ME_BASE_GIT_HASH "<no ME_BASE commit>"
+#endif
+
+// Function that returns the base commit hash (from the current repository)
+static mp_obj_t machine_micropython_commit(void) {
+    return mp_obj_new_str(MICROPY_ME_BASE_GIT_HASH, strlen(MICROPY_ME_BASE_GIT_HASH));
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(machine_micropython_commit_obj, machine_micropython_commit);
+
+// Function that returns the frame commit hash (from reerdigung-frame-controller)
+static mp_obj_t machine_ME_commit(void) {
+    return mp_obj_new_str(MICROPY_ME_FRAME_GIT_HASH, strlen(MICROPY_ME_FRAME_GIT_HASH));
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(machine_ME_commit_obj, machine_ME_commit);
+
+// --- End new commit hash functions ---
