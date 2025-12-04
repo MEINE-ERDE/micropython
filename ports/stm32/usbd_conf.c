@@ -170,10 +170,18 @@ static void mp_usbd_ll_init_fs(void) {
         HAL_NVIC_EnableIRQ(OTG_FS_IRQn);
         #endif
 
-        #if MICROPY_HW_TINYUSB_STACK
-        // Configure VBUS sensing for TinyUSB on STM32F4/F7 which have separate GCCFG register
-        // The DWC2 PHY init only sets PWRDWN bit, but doesn't configure VBUS sensing
-        #if defined(STM32F4) || defined(STM32F7)
+        // Configure VBUS sensing on STM32F4/F7/H7 which have separate GCCFG register
+        // This is needed for both TinyUSB and legacy USB stacks
+        #if defined(STM32H7)
+        // STM32H7 uses VBDEN bit for VBUS detect enable
+        #if defined(MICROPY_HW_USB_VBUS_DETECT_PIN)
+        // Enable VBUS detection
+        USB_OTG_FS->GCCFG |= USB_OTG_GCCFG_VBDEN;
+        #else
+        // Disable VBUS detection - force VBUS valid
+        USB_OTG_FS->GCCFG &= ~USB_OTG_GCCFG_VBDEN;
+        #endif
+        #elif defined(STM32F4) || defined(STM32F7)
         #if defined(MICROPY_HW_USB_VBUS_DETECT_PIN)
         // Enable VBUS sensing in "B device" mode (using PA9)
         USB_OTG_FS->GCCFG &= ~USB_OTG_GCCFG_NOVBUSSENS;
@@ -184,6 +192,12 @@ static void mp_usbd_ll_init_fs(void) {
         USB_OTG_FS->GCCFG &= ~(USB_OTG_GCCFG_VBUSBSEN | USB_OTG_GCCFG_VBUSASEN);
         #endif
         #endif
+
+        // Clear BASEPRI to ensure USB interrupt can be serviced during enumeration
+        // This prevents BASEPRI from blocking the USB interrupt when it was raised
+        // during boot-time flash operations
+        #if __CORTEX_M >= 0x03
+        __set_BASEPRI(0);
         #endif
     }
 }

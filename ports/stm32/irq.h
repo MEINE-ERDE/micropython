@@ -167,8 +167,9 @@ static inline void restore_irq_pri(uint32_t state) {
 // both the USB and cache flushing, when storage transfers are in progress.
 #define IRQ_PRI_FLASH           NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 6, 0)
 
-#define IRQ_PRI_OTG_FS          NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 6, 0)
-#define IRQ_PRI_OTG_HS          NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 6, 0)
+// USB priority raised from 6 to 5 to prevent BASEPRI blocking during flash operations at boot
+#define IRQ_PRI_OTG_FS          NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 5, 0)
+#define IRQ_PRI_OTG_HS          NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 5, 0)
 #define IRQ_PRI_TIM5            NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 6, 0)
 
 #define IRQ_PRI_CAN             NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 7, 0)
