@@ -71,7 +71,7 @@ static const char passwd_prompt[] = "Password: ";
 static const char connected_prompt[] = "\r\nWebREPL connected\r\n>>> ";
 static const char denied_prompt[] = "\r\nAccess denied\r\n";
 
-static char webrepl_passwd[10];
+static char webrepl_passwd[32];
 
 static void write_webrepl(mp_obj_t websock, const void *buf, size_t len) {
     const mp_stream_p_t *sock_stream = mp_get_stream(websock);
@@ -156,12 +156,13 @@ static void handle_op(mp_obj_webrepl_t *self) {
 
     self->cur_file = mp_builtin_open(2, open_args, (mp_map_t *)&mp_const_empty_map);
 
-    #if 0
-    struct mp_stream_seek_t seek = { .offset = self->hdr.offset, .whence = 0 };
-    int err;
-    mp_uint_t res = file_stream->ioctl(self->cur_file, MP_STREAM_SEEK, (uintptr_t)&seek, &err);
-    assert(res != MP_STREAM_ERROR);
-    #endif
+    if (self->hdr.offset != 0) {
+        const mp_stream_p_t *file_stream = mp_get_stream(self->cur_file);
+        struct mp_stream_seek_t seek = { .offset = self->hdr.offset, .whence = 0 };
+        int err;
+        mp_uint_t res = file_stream->ioctl(self->cur_file, MP_STREAM_SEEK, (uintptr_t)&seek, &err);
+        (void)res;
+    }
 
     write_webrepl_resp(self->sock, 0);
 
@@ -208,7 +209,7 @@ static mp_uint_t _webrepl_read(mp_obj_t self_in, void *buf, mp_uint_t size, int 
             self->state = STATE_NORMAL;
             self->data_to_recv = 0;
             write_webrepl_str(self->sock, SSTR(connected_prompt));
-        } else if (self->data_to_recv < 10) {
+        } else if (self->data_to_recv < sizeof(webrepl_passwd) - 1) {
             self->hdr.fname[self->data_to_recv++] = c;
         }
         return -2;
@@ -304,12 +305,18 @@ static mp_uint_t webrepl_write(mp_obj_t self_in, const void *buf, mp_uint_t size
 
 static mp_uint_t webrepl_ioctl(mp_obj_t o_in, mp_uint_t request, uintptr_t arg, int *errcode) {
     mp_obj_webrepl_t *self = MP_OBJ_TO_PTR(o_in);
-    (void)arg;
     switch (request) {
         case MP_STREAM_CLOSE:
             // TODO: This is a place to do cleanup
             mp_stream_close(self->sock);
             return 0;
+
+        case MP_STREAM_POLL: {
+            // Forward poll to underlying socket so async consumers (aiorepl
+            // via StreamReader on sys.stdin) can wait on WebREPL input.
+            const mp_stream_p_t *sock_stream = mp_get_stream(self->sock);
+            return sock_stream->ioctl(self->sock, request, arg, errcode);
+        }
 
         default:
             *errcode = MP_EINVAL;
