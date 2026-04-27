@@ -45,6 +45,16 @@
 
 #endif
 
+#if MICROPY_PY_HASHLIB_SHA512
+
+#if MICROPY_SSL_MBEDTLS
+#include "mbedtls/sha512.h"
+#else
+#error "hashlib.sha512 requires MICROPY_SSL_MBEDTLS"
+#endif
+
+#endif
+
 #if MICROPY_PY_HASHLIB_SHA1 || MICROPY_PY_HASHLIB_MD5
 
 #if MICROPY_SSL_AXTLS
@@ -163,6 +173,65 @@ static MP_DEFINE_CONST_OBJ_TYPE(
     MP_TYPE_FLAG_NONE,
     make_new, hashlib_sha256_make_new,
     locals_dict, &hashlib_sha256_locals_dict
+    );
+#endif
+
+#if MICROPY_PY_HASHLIB_SHA512
+static mp_obj_t hashlib_sha512_update(mp_obj_t self_in, mp_obj_t arg);
+
+#if MBEDTLS_VERSION_NUMBER < 0x02070000 || MBEDTLS_VERSION_NUMBER >= 0x03000000
+#define mbedtls_sha512_starts_ret mbedtls_sha512_starts
+#define mbedtls_sha512_update_ret mbedtls_sha512_update
+#define mbedtls_sha512_finish_ret mbedtls_sha512_finish
+#endif
+
+static mp_obj_t hashlib_sha512_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *args) {
+    mp_arg_check_num(n_args, n_kw, 0, 1, false);
+    mp_obj_hash_t *o = mp_obj_malloc_var(mp_obj_hash_t, state, char, sizeof(mbedtls_sha512_context), type);
+    o->final = false;
+    mbedtls_sha512_init((mbedtls_sha512_context *)&o->state);
+    mbedtls_sha512_starts_ret((mbedtls_sha512_context *)&o->state, 0);
+    if (n_args == 1) {
+        hashlib_sha512_update(MP_OBJ_FROM_PTR(o), args[0]);
+    }
+    return MP_OBJ_FROM_PTR(o);
+}
+
+static mp_obj_t hashlib_sha512_update(mp_obj_t self_in, mp_obj_t arg) {
+    mp_obj_hash_t *self = MP_OBJ_TO_PTR(self_in);
+    hashlib_ensure_not_final(self);
+    mp_buffer_info_t bufinfo;
+    mp_get_buffer_raise(arg, &bufinfo, MP_BUFFER_READ);
+    mbedtls_sha512_update_ret((mbedtls_sha512_context *)&self->state, bufinfo.buf, bufinfo.len);
+    return mp_const_none;
+}
+
+static mp_obj_t hashlib_sha512_digest(mp_obj_t self_in) {
+    mp_obj_hash_t *self = MP_OBJ_TO_PTR(self_in);
+    hashlib_ensure_not_final(self);
+    self->final = true;
+    vstr_t vstr;
+    vstr_init_len(&vstr, 64);
+    mbedtls_sha512_finish_ret((mbedtls_sha512_context *)&self->state, (unsigned char *)vstr.buf);
+    return mp_obj_new_bytes_from_vstr(&vstr);
+}
+
+static MP_DEFINE_CONST_FUN_OBJ_2(hashlib_sha512_update_obj, hashlib_sha512_update);
+static MP_DEFINE_CONST_FUN_OBJ_1(hashlib_sha512_digest_obj, hashlib_sha512_digest);
+
+static const mp_rom_map_elem_t hashlib_sha512_locals_dict_table[] = {
+    { MP_ROM_QSTR(MP_QSTR_update), MP_ROM_PTR(&hashlib_sha512_update_obj) },
+    { MP_ROM_QSTR(MP_QSTR_digest), MP_ROM_PTR(&hashlib_sha512_digest_obj) },
+};
+
+static MP_DEFINE_CONST_DICT(hashlib_sha512_locals_dict, hashlib_sha512_locals_dict_table);
+
+static MP_DEFINE_CONST_OBJ_TYPE(
+    hashlib_sha512_type,
+    MP_QSTR_sha512,
+    MP_TYPE_FLAG_NONE,
+    make_new, hashlib_sha512_make_new,
+    locals_dict, &hashlib_sha512_locals_dict
     );
 #endif
 
@@ -358,6 +427,9 @@ static const mp_rom_map_elem_t mp_module_hashlib_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_hashlib) },
     #if MICROPY_PY_HASHLIB_SHA256
     { MP_ROM_QSTR(MP_QSTR_sha256), MP_ROM_PTR(&hashlib_sha256_type) },
+    #endif
+    #if MICROPY_PY_HASHLIB_SHA512
+    { MP_ROM_QSTR(MP_QSTR_sha512), MP_ROM_PTR(&hashlib_sha512_type) },
     #endif
     #if MICROPY_PY_HASHLIB_SHA1
     { MP_ROM_QSTR(MP_QSTR_sha1), MP_ROM_PTR(&hashlib_sha1_type) },

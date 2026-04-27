@@ -1975,6 +1975,10 @@ typedef time_t mp_timestamp_t;
 #define MICROPY_PY_HASHLIB_SHA256 (1)
 #endif
 
+#ifndef MICROPY_PY_HASHLIB_SHA512
+#define MICROPY_PY_HASHLIB_SHA512 (0)
+#endif
+
 #ifndef MICROPY_PY_CRYPTOLIB
 #define MICROPY_PY_CRYPTOLIB (MICROPY_PY_SSL)
 #endif
