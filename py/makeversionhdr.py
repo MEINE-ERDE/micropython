@@ -110,11 +110,11 @@ def make_version_header(repo_path, filename):
         print("makeversionhdr.py: Error: No version information available.")
         sys.exit(1)
 
-    build_date = datetime.date.today()
+    build_date = datetime.datetime.now()
     if "SOURCE_DATE_EPOCH" in os.environ:
         build_date = datetime.datetime.fromtimestamp(
             int(os.environ["SOURCE_DATE_EPOCH"]), datetime.timezone.utc
-        ).date()
+        )
 
     # Generate the file with the git and version info
     # Note: MICROPY_GIT_HASH may be used by third-party code.
@@ -126,7 +126,7 @@ def make_version_header(repo_path, filename):
 """ % (
         git_tag,
         git_hash or "<no hash>",
-        build_date.strftime("%Y-%m-%d"),
+        build_date.strftime("%Y-%m-%d %H:%M"),
     )
 
     # Check if the file contents changed from last time
