@@ -324,6 +324,20 @@ static int do_reader_stdin(int c) {
     return parse_compile_execute(&reader, MP_PARSE_FILE_INPUT, exec_flags);
 }
 
+#if defined(MP_HAL_UNIQUE_ID_ADDRESS)
+// Same 12 bytes and hex formatting as binascii.hexlify(machine.unique_id()).
+static void print_unique_id(void) {
+    const uint8_t *id = (const uint8_t *)MP_HAL_UNIQUE_ID_ADDRESS;
+    char hex[24];
+    for (size_t i = 0; i < sizeof(hex) / 2; ++i) {
+        hex[2 * i] = "0123456789abcdef"[id[i] >> 4];
+        hex[2 * i + 1] = "0123456789abcdef"[id[i] & 0xf];
+    }
+    mp_hal_stdout_tx_str("; Machine ID: ");
+    mp_hal_stdout_tx_strn(hex, sizeof(hex));
+}
+#endif
+
 #if MICROPY_REPL_EVENT_DRIVEN
 
 typedef struct _repl_t {
@@ -450,6 +464,9 @@ static int pyexec_friendly_repl_process_char(int c) {
             mp_hal_stdout_tx_str("\r\n");
             mp_hal_stdout_tx_str(MICROPY_BANNER_NAME_AND_VERSION);
             mp_hal_stdout_tx_str("; " MICROPY_BANNER_MACHINE);
+            #if defined(MP_HAL_UNIQUE_ID_ADDRESS)
+            print_unique_id();
+            #endif
             mp_hal_stdout_tx_str("\r\n");
             #if MICROPY_PY_BUILTINS_HELP
             mp_hal_stdout_tx_str("Type \"help()\" for more information.\r\n");
@@ -623,6 +640,9 @@ int pyexec_friendly_repl(void) {
 friendly_repl_reset:
     mp_hal_stdout_tx_str(MICROPY_BANNER_NAME_AND_VERSION);
     mp_hal_stdout_tx_str("; " MICROPY_BANNER_MACHINE);
+    #if defined(MP_HAL_UNIQUE_ID_ADDRESS)
+    print_unique_id();
+    #endif
     mp_hal_stdout_tx_str("\r\n");
     #if MICROPY_PY_BUILTINS_HELP
     mp_hal_stdout_tx_str("Type \"help()\" for more information.\r\n");
