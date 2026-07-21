@@ -282,6 +282,14 @@ static mp_uint_t websocket_ioctl(mp_obj_t self_in, mp_uint_t request, uintptr_t 
             self->opts = (self->opts & ~FRAME_OPCODE_MASK) | (arg & FRAME_OPCODE_MASK);
             return cur;
         }
+        case MP_STREAM_POLL: {
+            // Forward poll to the underlying socket so poll/select and
+            // dupterm consumers (WebREPL through aiorepl's stdin wait) wake
+            // on incoming frames. websocket keeps no unread payload of its
+            // own — readable socket is the only "data available" signal.
+            const mp_stream_p_t *stream_p = mp_get_stream(self->sock);
+            return stream_p->ioctl(self->sock, request, arg, errcode);
+        }
         default:
             *errcode = MP_EINVAL;
             return MP_STREAM_ERROR;
