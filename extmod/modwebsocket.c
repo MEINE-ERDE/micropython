@@ -53,6 +53,11 @@ typedef struct _mp_obj_websocket_t {
     byte ws_flags;
     // Copy of current frame flags
     byte last_flags;
+    // Set once the peer closed (socket EOF or a CLOSE frame). A closed
+    // socket reports readable-EOF forever; without suppressing that in
+    // POLL an asyncio reader (WebREPL via aiorepl's stdin) spins on it and
+    // starves the event loop.
+    byte closed;
 } mp_obj_websocket_t;
 
 static mp_uint_t websocket_write(mp_obj_t self_in, const void *buf, mp_uint_t size, int *errcode);
@@ -68,6 +73,7 @@ static mp_obj_t websocket_make_new(const mp_obj_type_t *type, size_t n_args, siz
     o->mask_pos = 0;
     o->buf_pos = 0;
     o->opts = FRAME_TXT;
+    o->closed = 0;
     if (n_args > 1 && args[1] == mp_const_true) {
         o->opts |= BLOCKING_WRITE;
     }
@@ -81,7 +87,11 @@ static mp_uint_t websocket_read(mp_obj_t self_in, void *buf, mp_uint_t size, int
     while (1) {
         if (self->to_recv != 0) {
             mp_uint_t out_sz = stream_p->read(self->sock, self->buf + self->buf_pos, self->to_recv, errcode);
-            if (out_sz == 0 || out_sz == MP_STREAM_ERROR) {
+            if (out_sz == 0) {
+                self->closed = 1;
+                return out_sz;
+            }
+            if (out_sz == MP_STREAM_ERROR) {
                 return out_sz;
             }
             self->buf_pos += out_sz;
@@ -172,7 +182,11 @@ static mp_uint_t websocket_read(mp_obj_t self_in, void *buf, mp_uint_t size, int
 
                 size_t sz = MIN(size, self->msg_sz);
                 out_sz = stream_p->read(self->sock, buf, sz, errcode);
-                if (out_sz == 0 || out_sz == MP_STREAM_ERROR) {
+                if (out_sz == 0) {
+                    self->closed = 1;
+                    return out_sz;
+                }
+                if (out_sz == MP_STREAM_ERROR) {
                     return out_sz;
                 }
 
@@ -198,6 +212,7 @@ static mp_uint_t websocket_read(mp_obj_t self_in, void *buf, mp_uint_t size, int
                             static const byte close_resp[2] = {0x88, 0};
                             int err;
                             websocket_write_raw(self_in, close_resp, sizeof(close_resp), close_resp, 0, &err);
+                            self->closed = 1;
                             return 0;
                         }
 
@@ -219,6 +234,14 @@ static mp_uint_t websocket_read(mp_obj_t self_in, void *buf, mp_uint_t size, int
 
 static mp_uint_t websocket_write(mp_obj_t self_in, const void *buf, mp_uint_t size, int *errcode) {
     mp_obj_websocket_t *self = MP_OBJ_TO_PTR(self_in);
+    if (self->closed) {
+        // Peer is gone. With BLOCKING_WRITE the socket write would block
+        // until TCP gives up (seconds), stalling the event loop, and an
+        // error would crash the aiorepl task writing the prompt. Discard
+        // silently so the caller neither blocks nor errors; the reader
+        // parks via the POLL suppression above.
+        return size;
+    }
     if (size >= 0x10000) {
         *errcode = MP_ENOBUFS;
         return MP_STREAM_ERROR;
@@ -288,7 +311,17 @@ static mp_uint_t websocket_ioctl(mp_obj_t self_in, mp_uint_t request, uintptr_t 
             // on incoming frames. websocket keeps no unread payload of its
             // own — readable socket is the only "data available" signal.
             const mp_stream_p_t *stream_p = mp_get_stream(self->sock);
-            return stream_p->ioctl(self->sock, request, arg, errcode);
+            mp_uint_t ret = stream_p->ioctl(self->sock, request, arg, errcode);
+            if (self->closed) {
+                // Once the peer has closed, the socket reports readable-EOF
+                // forever. asyncio's IOQueue wakes a reader on any event
+                // that is not purely POLLOUT, so leaving RD/HUP/ERR set
+                // makes an aiorepl stdin reader spin on EOF and starve the
+                // loop. Clear them so the reader parks instead; the Python
+                // webrepl supervisor / reconnect reclaim detaches dupterm.
+                ret &= ~(mp_uint_t)(MP_STREAM_POLL_RD | MP_STREAM_POLL_HUP | MP_STREAM_POLL_ERR);
+            }
+            return ret;
         }
         default:
             *errcode = MP_EINVAL;
