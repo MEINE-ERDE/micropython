@@ -785,11 +785,15 @@ static mp_uint_t lwip_tcp_send(lwip_socket_obj_t *socket, const byte *buf, mp_ui
     u16_t write_len = MIN(available, len);
 
     // If tcp_write returns ERR_MEM then there's currently not enough memory to
-    // queue the write, so wait and keep trying until it succeeds (with 10s limit).
-    // Note: if the socket is non-blocking then this code will actually block until
-    // there's enough memory to do the write, but by this stage we have already
-    // committed to being able to write the data.
+    // queue the write (the segment pool runs out long before the byte budget
+    // when the peer's window is shut), so wait and keep trying until it
+    // succeeds. The wait honours the socket timeout: a non-blocking socket
+    // gets one retry and then EAGAIN, a timed socket gives up once its
+    // timeout has elapsed, a blocking socket keeps the 10 s cap. Before this
+    // the loop ignored the timeout and held the caller, and with it the
+    // asyncio loop and the watchdog feed, for the full 10 s per write.
     err_t err;
+    mp_uint_t retry_start = mp_hal_ticks_ms();
     for (int i = 0; i < 200; ++i) {
         err = tcp_write(socket->pcb.tcp, buf, write_len, TCP_WRITE_FLAG_COPY);
         if (err != ERR_MEM) {
@@ -798,6 +802,18 @@ static mp_uint_t lwip_tcp_send(lwip_socket_obj_t *socket, const byte *buf, mp_ui
         err = tcp_output(socket->pcb.tcp);
         if (err != ERR_OK) {
             break;
+        }
+        err = ERR_MEM;
+        if (socket->timeout == 0) {
+            if (i > 0) {
+                MICROPY_PY_LWIP_EXIT
+                *_errno = MP_EAGAIN;
+                return MP_STREAM_ERROR;
+            }
+        } else if (socket->timeout != -1 && mp_hal_ticks_ms() - retry_start > socket->timeout) {
+            MICROPY_PY_LWIP_EXIT
+            *_errno = MP_ETIMEDOUT;
+            return MP_STREAM_ERROR;
         }
         MICROPY_PY_LWIP_EXIT
         mp_hal_delay_ms(50);
