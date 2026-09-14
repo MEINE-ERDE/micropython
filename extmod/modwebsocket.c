@@ -38,6 +38,12 @@ enum { FRAME_HEADER, FRAME_OPT, PAYLOAD, CONTROL };
 
 enum { BLOCKING_WRITE = 0x80 };
 
+// A blocking write waits at most this long for send-buffer space. lwIP only
+// waits once the peer has fallen a full window behind, so a live client on
+// a lossy link still gets one retransmit recovery, while a client that
+// stopped reading costs the event loop one second before it is dropped.
+#define WEBSOCKET_WRITE_TIMEOUT_S (1)
+
 typedef struct _mp_obj_websocket_t {
     mp_obj_base_t base;
     mp_obj_t sock;
@@ -89,6 +95,11 @@ static mp_uint_t websocket_read_frames(mp_obj_t self_in, void *buf, mp_uint_t si
 
 static mp_uint_t websocket_read(mp_obj_t self_in, void *buf, mp_uint_t size, int *errcode) {
     mp_obj_websocket_t *self = MP_OBJ_TO_PTR(self_in);
+    if (self->closed && !self->has_peek) {
+        // The socket may already be closed (write timeout drop): report EOF
+        // without touching it.
+        return 0;
+    }
     if (!self->has_peek) {
         return websocket_read_frames(self_in, buf, size, errcode);
     }
@@ -294,17 +305,47 @@ static mp_uint_t websocket_write_raw(mp_obj_t self_in, const byte *header, int h
 
     mp_obj_t dest[3];
     if (self->opts & BLOCKING_WRITE) {
-        mp_load_method(self->sock, MP_QSTR_setblocking, dest);
-        dest[2] = mp_const_true;
+        mp_load_method(self->sock, MP_QSTR_settimeout, dest);
+        dest[2] = MP_OBJ_NEW_SMALL_INT(WEBSOCKET_WRITE_TIMEOUT_S);
         mp_call_method_n_kw(1, 0, dest);
     }
 
-    mp_uint_t out_sz = mp_stream_write_exactly(self->sock, header, hdr_sz, errcode);
-    if (*errcode == 0) {
-        out_sz = mp_stream_write_exactly(self->sock, buf, size, errcode);
+    // Send header and payload in one call when they fit, and in the
+    // blocking mode never retry a partial write: each socket call waits up
+    // to the timeout on its own, so a peer that frees a few bytes at a time
+    // would otherwise stretch one frame over many timeouts. lwIP only
+    // writes short once the peer is a full send buffer behind, which is a
+    // stalled peer, not a slow one.
+    byte flags = MP_STREAM_RW_WRITE | ((self->opts & BLOCKING_WRITE) ? MP_STREAM_RW_ONCE : 0);
+    byte joined[512];
+    mp_uint_t total = hdr_sz + size;
+    mp_uint_t done;
+    if (total <= sizeof(joined)) {
+        memcpy(joined, header, hdr_sz);
+        memcpy(joined + hdr_sz, buf, size);
+        done = mp_stream_rw(self->sock, joined, total, errcode, flags);
+    } else {
+        done = mp_stream_rw(self->sock, (void *)header, hdr_sz, errcode, flags);
+        if (*errcode == 0 && done == (mp_uint_t)hdr_sz) {
+            done += mp_stream_rw(self->sock, (void *)buf, size, errcode, flags);
+        }
     }
+    bool complete = *errcode == 0 && done == total;
 
     if (self->opts & BLOCKING_WRITE) {
+        if (!complete) {
+            // Timed out on a peer that stopped reading, or the peer reset.
+            // A websocket frame cannot resume after a partial send, and a
+            // blocking caller (dupterm) must neither hang nor see an error,
+            // so drop the client: the reader parks, later writes are
+            // discarded, and closing the socket lets the Python webrepl
+            // supervisor detach it on its next tick.
+            self->closed = 1;
+            mp_stream_close(self->sock);
+            *errcode = 0;
+            return size;
+        }
+        mp_load_method(self->sock, MP_QSTR_setblocking, dest);
         dest[2] = mp_const_false;
         mp_call_method_n_kw(1, 0, dest);
     }
@@ -312,7 +353,7 @@ static mp_uint_t websocket_write_raw(mp_obj_t self_in, const byte *header, int h
     if (*errcode != 0) {
         return MP_STREAM_ERROR;
     }
-    return out_sz;
+    return done > (mp_uint_t)hdr_sz ? done - hdr_sz : 0;
 }
 
 static mp_uint_t websocket_ioctl(mp_obj_t self_in, mp_uint_t request, uintptr_t arg, int *errcode) {
@@ -345,6 +386,12 @@ static mp_uint_t websocket_ioctl(mp_obj_t self_in, mp_uint_t request, uintptr_t 
             // CLOSE frame and a socket error mark the peer gone; from then
             // on the reader parks and the Python webrepl supervisor /
             // reconnect reclaim detaches dupterm.
+            if (self->closed) {
+                // Nothing will ever be readable again, and the socket may
+                // already be closed: polling it would report NVAL, which
+                // wakes an asyncio reader just like RD does.
+                return 0;
+            }
             const mp_stream_p_t *stream_p = mp_get_stream(self->sock);
             mp_uint_t ret = stream_p->ioctl(self->sock, request, arg, errcode);
             if (ret == MP_STREAM_ERROR) {
