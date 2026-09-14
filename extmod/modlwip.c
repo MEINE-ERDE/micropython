@@ -61,7 +61,10 @@
 
 // Timeout between closing a TCP socket and doing a tcp_abort on that
 // socket, if the connection isn't closed cleanly in that time.
-#define MICROPY_PY_LWIP_TCP_CLOSE_TIMEOUT_MS (10000)
+// A closed socket with unsent data to a peer that stopped reading keeps its
+// queued pbufs until this abort: 3 s is plenty for a healthy peer to ACK a
+// FIN, and it caps how long a dropped peer can hold the heap from others.
+#define MICROPY_PY_LWIP_TCP_CLOSE_TIMEOUT_MS (3000)
 
 // All socket options should be globally distinct,
 // because we ignore option levels for efficiency.
