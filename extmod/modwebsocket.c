@@ -58,6 +58,10 @@ typedef struct _mp_obj_websocket_t {
     // POLL an asyncio reader (WebREPL via aiorepl's stdin) spins on it and
     // starves the event loop.
     byte closed;
+    // One payload byte fetched by MP_STREAM_POLL and held for the next
+    // read, so "readable" is only ever reported with a byte in hand.
+    byte has_peek;
+    byte peek;
 } mp_obj_websocket_t;
 
 static mp_uint_t websocket_write(mp_obj_t self_in, const void *buf, mp_uint_t size, int *errcode);
@@ -74,13 +78,34 @@ static mp_obj_t websocket_make_new(const mp_obj_type_t *type, size_t n_args, siz
     o->buf_pos = 0;
     o->opts = FRAME_TXT;
     o->closed = 0;
+    o->has_peek = 0;
     if (n_args > 1 && args[1] == mp_const_true) {
         o->opts |= BLOCKING_WRITE;
     }
     return MP_OBJ_FROM_PTR(o);
 }
 
+static mp_uint_t websocket_read_frames(mp_obj_t self_in, void *buf, mp_uint_t size, int *errcode);
+
 static mp_uint_t websocket_read(mp_obj_t self_in, void *buf, mp_uint_t size, int *errcode) {
+    mp_obj_websocket_t *self = MP_OBJ_TO_PTR(self_in);
+    if (!self->has_peek) {
+        return websocket_read_frames(self_in, buf, size, errcode);
+    }
+    ((byte *)buf)[0] = self->peek;
+    self->has_peek = 0;
+    if (size == 1) {
+        return 1;
+    }
+    int err = 0;
+    mp_uint_t more = websocket_read_frames(self_in, (byte *)buf + 1, size - 1, &err);
+    if (more == 0 || more == MP_STREAM_ERROR) {
+        return 1;
+    }
+    return 1 + more;
+}
+
+static mp_uint_t websocket_read_frames(mp_obj_t self_in, void *buf, mp_uint_t size, int *errcode) {
     mp_obj_websocket_t *self = MP_OBJ_TO_PTR(self_in);
 
     const mp_stream_p_t *stream_p = mp_get_stream(self->sock);
@@ -308,18 +333,37 @@ static mp_uint_t websocket_ioctl(mp_obj_t self_in, mp_uint_t request, uintptr_t 
         case MP_STREAM_POLL: {
             // Forward poll to the underlying socket so poll/select and
             // dupterm consumers (WebREPL through aiorepl's stdin wait) wake
-            // on incoming frames. websocket keeps no unread payload of its
-            // own — readable socket is the only "data available" signal.
+            // on incoming frames.
+            //
+            // lwIP reports a peer-closed socket as readable and a reset as
+            // HUP. A dupterm reader woken by either reads no byte and then
+            // sits in mp_hal_stdin_rx_chr, which loops until some stdin
+            // source yields a char: the asyncio loop and the watchdog feed
+            // stop with it and the board resets 20 s later. So "readable"
+            // is only reported with a payload byte in hand: run the frame
+            // parser here and hold the byte for the next read. EOF, a
+            // CLOSE frame and a socket error mark the peer gone; from then
+            // on the reader parks and the Python webrepl supervisor /
+            // reconnect reclaim detaches dupterm.
             const mp_stream_p_t *stream_p = mp_get_stream(self->sock);
             mp_uint_t ret = stream_p->ioctl(self->sock, request, arg, errcode);
-            if (self->closed) {
-                // Once the peer has closed, the socket reports readable-EOF
-                // forever. asyncio's IOQueue wakes a reader on any event
-                // that is not purely POLLOUT, so leaving RD/HUP/ERR set
-                // makes an aiorepl stdin reader spin on EOF and starve the
-                // loop. Clear them so the reader parks instead; the Python
-                // webrepl supervisor / reconnect reclaim detaches dupterm.
-                ret &= ~(mp_uint_t)(MP_STREAM_POLL_RD | MP_STREAM_POLL_HUP | MP_STREAM_POLL_ERR);
+            if (ret == MP_STREAM_ERROR) {
+                return ret;
+            }
+            const mp_uint_t rd_flags = MP_STREAM_POLL_RD | MP_STREAM_POLL_HUP | MP_STREAM_POLL_ERR;
+            if (!self->closed && !self->has_peek && (ret & rd_flags)) {
+                int err = 0;
+                mp_uint_t got = websocket_read_frames(self_in, &self->peek, 1, &err);
+                if (got == 1) {
+                    self->has_peek = 1;
+                } else if (got == 0 || !mp_is_nonblocking_error(err)) {
+                    self->closed = 1;
+                }
+                // A nonblocking error is a partial frame: wait for the rest.
+            }
+            ret &= ~rd_flags;
+            if (self->has_peek) {
+                ret |= arg & MP_STREAM_POLL_RD;
             }
             return ret;
         }
