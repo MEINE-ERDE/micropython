@@ -158,7 +158,15 @@
 
 static uint8_t pyb_sdmmc_flags;
 
-#define TIMEOUT_MS 30000
+// Below the 20 s application watchdog: a transfer that never completes (a card
+// pulled mid-write waits forever for its CRC status, which the SDMMC data timer
+// does not cover) must come back as an error, not freeze the board until the
+// watchdog resets it in the middle of a filesystem write. A healthy card
+// finishes an 8-block write well inside it even at the spec's 500 ms busy per
+// block. At this limit sdcard_stop_transfer ends the transfer; HAL_SD_Abort is
+// no way out, it busy-waits up to SDMMC_DATATIMEOUT milliseconds for flags a
+// vanished card never raises.
+#define TIMEOUT_MS 10000
 
 // TODO: I think that as an optimization, we can allocate these dynamically
 //       if an sd card is detected. This will save approx 260 bytes of RAM
@@ -443,6 +451,30 @@ static void sdcard_reset_periph(void) {
     SDIO->ICR = SDMMC_STATIC_FLAGS;
 }
 
+// Stop a transfer the wait gave up on without waiting for the card: interrupts
+// off, the data path and its DMA stopped, so nothing touches the caller's buffer
+// once the call returns, and the HAL is ready for the next transfer.
+static void sdcard_stop_transfer(void) {
+    #if defined(STM32H5) || defined(STM32H7) || defined(STM32N6)
+    #if MICROPY_HW_ENABLE_MMCARD
+    if (pyb_sdmmc_flags & PYB_SDMMC_FLAG_MMC) {
+        __HAL_MMC_DISABLE_IT(&sdmmc_handle.mmc, SDMMC_IT_DATAEND | SDMMC_IT_DCRCFAIL
+            | SDMMC_IT_DTIMEOUT | SDMMC_IT_TXUNDERR | SDMMC_IT_RXOVERR);
+        sdmmc_handle.mmc.State = HAL_MMC_STATE_READY;
+        sdmmc_handle.mmc.Context = MMC_CONTEXT_NONE;
+    } else
+    #endif
+    {
+        __HAL_SD_DISABLE_IT(&sdmmc_handle.sd, SDMMC_IT_DATAEND | SDMMC_IT_DCRCFAIL
+            | SDMMC_IT_DTIMEOUT | SDMMC_IT_TXUNDERR | SDMMC_IT_RXOVERR);
+        sdmmc_handle.sd.State = HAL_SD_STATE_READY;
+        sdmmc_handle.sd.Context = SD_CONTEXT_NONE;
+    }
+    SDIO->IDMACTRL = 0;
+    sdcard_reset_periph();
+    #endif
+}
+
 static HAL_StatusTypeDef sdcard_wait_finished(void) {
     // Wait for HAL driver to be ready (eg for DMA to finish)
     uint32_t start = HAL_GetTick();
@@ -466,6 +498,7 @@ static HAL_StatusTypeDef sdcard_wait_finished(void) {
         __WFI();
         enable_irq(irq_state);
         if (HAL_GetTick() - start >= TIMEOUT_MS) {
+            sdcard_stop_transfer();
             return HAL_TIMEOUT;
         }
     }
@@ -516,7 +549,41 @@ static HAL_StatusTypeDef sdcard_common_checks(uint32_t block_num, uint32_t num_b
     return HAL_OK;
 }
 
-mp_uint_t sdcard_read_blocks(uint8_t *dest, uint32_t block_num, uint32_t num_blocks) {
+// Custom ioctl ops, above the MP_BLOCKDEV_IOCTL_* range: the counters below.
+#define SDCARD_IOCTL_DATA_ERRORS (0x100)
+#define SDCARD_IOCTL_FAILED_TRANSFERS (0x101)
+
+// Transfer attempts that failed (data CRC, data timeout, FIFO overrun or
+// underrun, a failed stop or status command) although the card went back to
+// the transfer state: the HAL reports those only through the handle's
+// ErrorCode, and they used to come back as success.
+static uint32_t sdcard_data_errors;
+// Transfers that still failed after the retry, returned to the caller.
+static uint32_t sdcard_failed_transfers;
+
+static HAL_StatusTypeDef sdcard_check_data_phase(HAL_StatusTypeDef err) {
+    if (err != HAL_OK) {
+        return err;
+    }
+    uint32_t error_code;
+    #if MICROPY_HW_ENABLE_MMCARD
+    if (pyb_sdmmc_flags & PYB_SDMMC_FLAG_MMC) {
+        error_code = sdmmc_handle.mmc.ErrorCode;
+    } else
+    #endif
+    {
+        error_code = sdmmc_handle.sd.ErrorCode;
+    }
+    if (error_code != 0) {
+        ++sdcard_data_errors;
+        // A data timeout already took SDMMC_DATATIMEOUT: report it as a
+        // timeout so it is not retried.
+        return (error_code & SDMMC_ERROR_DATA_TIMEOUT) ? HAL_TIMEOUT : HAL_ERROR;
+    }
+    return HAL_OK;
+}
+
+static mp_uint_t sdcard_read_blocks_once(uint8_t *dest, uint32_t block_num, uint32_t num_blocks) {
     HAL_StatusTypeDef err = sdcard_common_checks(block_num, num_blocks);
     if (err != HAL_OK) {
         return err;
@@ -574,6 +641,12 @@ mp_uint_t sdcard_read_blocks(uint8_t *dest, uint32_t block_num, uint32_t num_blo
             err = sdcard_wait_finished();
         }
 
+        // Drop lines the CPU filled speculatively while the DMA ran. Not
+        // dma_unprotect_rx_region: the UI keeps its framebuffer uncached with
+        // the same MPU region, and every SD read would clobber it.
+        MP_HAL_CLEANINVALIDATE_DCACHE(dest, num_blocks * SDCARD_BLOCK_SIZE);
+        err = sdcard_check_data_phase(err);
+
         #if SDIO_USE_GPDMA
         dma_deinit(&SDMMC_DMA);
         #if MICROPY_HW_ENABLE_MMCARD
@@ -610,7 +683,7 @@ mp_uint_t sdcard_read_blocks(uint8_t *dest, uint32_t block_num, uint32_t num_blo
     return err;
 }
 
-mp_uint_t sdcard_write_blocks(const uint8_t *src, uint32_t block_num, uint32_t num_blocks) {
+static mp_uint_t sdcard_write_blocks_once(const uint8_t *src, uint32_t block_num, uint32_t num_blocks) {
     HAL_StatusTypeDef err = sdcard_common_checks(block_num, num_blocks);
     if (err != HAL_OK) {
         return err;
@@ -625,7 +698,7 @@ mp_uint_t sdcard_write_blocks(const uint8_t *src, uint32_t block_num, uint32_t n
         }
         for (size_t i = 0; i < num_blocks; ++i) {
             memcpy(src_aligned, src + i * SDCARD_BLOCK_SIZE, SDCARD_BLOCK_SIZE);
-            err = sdcard_write_blocks(src_aligned, block_num + i, 1);
+            err = sdcard_write_blocks_once(src_aligned, block_num + i, 1);
             if (err != HAL_OK) {
                 break;
             }
@@ -666,6 +739,7 @@ mp_uint_t sdcard_write_blocks(const uint8_t *src, uint32_t block_num, uint32_t n
         if (err == HAL_OK) {
             err = sdcard_wait_finished();
         }
+        err = sdcard_check_data_phase(err);
 
         #if SDIO_USE_GPDMA
         dma_deinit(&SDMMC_DMA);
@@ -694,6 +768,31 @@ mp_uint_t sdcard_write_blocks(const uint8_t *src, uint32_t block_num, uint32_t n
         }
     }
 
+    return err;
+}
+
+// A transfer that failed is tried once more, unless it timed out: that wait
+// already took SDMMC_DATATIMEOUT or TIMEOUT_MS. Block reads and writes are
+// idempotent.
+mp_uint_t sdcard_read_blocks(uint8_t *dest, uint32_t block_num, uint32_t num_blocks) {
+    mp_uint_t err = sdcard_read_blocks_once(dest, block_num, num_blocks);
+    if (err != HAL_OK && err != HAL_TIMEOUT) {
+        err = sdcard_read_blocks_once(dest, block_num, num_blocks);
+    }
+    if (err != HAL_OK) {
+        ++sdcard_failed_transfers;
+    }
+    return err;
+}
+
+mp_uint_t sdcard_write_blocks(const uint8_t *src, uint32_t block_num, uint32_t num_blocks) {
+    mp_uint_t err = sdcard_write_blocks_once(src, block_num, num_blocks);
+    if (err != HAL_OK && err != HAL_TIMEOUT) {
+        err = sdcard_write_blocks_once(src, block_num, num_blocks);
+    }
+    if (err != HAL_OK) {
+        ++sdcard_failed_transfers;
+    }
     return err;
 }
 
@@ -864,6 +963,12 @@ static mp_obj_t pyb_sdcard_ioctl(mp_obj_t self, mp_obj_t cmd_in, mp_obj_t arg_in
 
         case MP_BLOCKDEV_IOCTL_BLOCK_SIZE:
             return MP_OBJ_NEW_SMALL_INT(SDCARD_BLOCK_SIZE);
+
+        case SDCARD_IOCTL_DATA_ERRORS:
+            return mp_obj_new_int_from_uint(sdcard_data_errors);
+
+        case SDCARD_IOCTL_FAILED_TRANSFERS:
+            return mp_obj_new_int_from_uint(sdcard_failed_transfers);
 
         default: // unknown command
             return MP_OBJ_NEW_SMALL_INT(-1); // error
