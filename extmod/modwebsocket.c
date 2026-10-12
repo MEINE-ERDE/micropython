@@ -232,6 +232,13 @@ static mp_uint_t websocket_read_frames(mp_obj_t self_in, void *buf, mp_uint_t si
                 }
 
                 self->msg_sz -= out_sz;
+                if (self->state == CONTROL) {
+                    // A control frame's payload (the close status code, ping
+                    // data) is protocol, not terminal input: consumed here,
+                    // never handed to the reader. A close status of 1000 is
+                    // 0x03 0xE8, and 0x03 handed up is a Ctrl-C.
+                    out_sz = 0;
+                }
                 if (self->msg_sz == 0) {
                     byte last_state;
                 no_payload:
