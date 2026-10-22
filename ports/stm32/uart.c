@@ -55,6 +55,33 @@
 #define UART_RXNE_IT_DIS(uart) do { (uart)->CR1 &= ~USART_CR1_RXNEIE; } while (0)
 #endif
 
+#if defined(STM32F4) || defined(STM32L1)
+#define UART_TXE_IS_SET(uart) ((uart)->SR & USART_SR_TXE)
+#define UART_TC_IS_SET(uart) ((uart)->SR & USART_SR_TC)
+#define UART_TX_PUT(uart, data) do { (uart)->DR = (data); } while (0)
+#else
+#define UART_TXE_IS_SET(uart) ((uart)->ISR & UART_FLAG_TXE)
+#define UART_TC_IS_SET(uart) ((uart)->ISR & UART_FLAG_TC)
+#define UART_TX_PUT(uart, data) do { (uart)->TDR = (data); } while (0)
+#endif
+
+// The transmit ring is drained by the TX FIFO threshold interrupt where the
+// FIFO is used (one interrupt per 14 characters, see uart_init), otherwise by
+// the TX-empty / TX-FIFO-not-full interrupt.
+#if defined(STM32H7) || defined(STM32N6)
+#define UART_TX_IT_EN(uart) do { (uart)->CR3 |= USART_CR3_TXFTIE; } while (0)
+#define UART_TX_IT_DIS(uart) do { (uart)->CR3 &= ~USART_CR3_TXFTIE; } while (0)
+#define UART_TX_IT_IS_EN(uart) ((uart)->CR3 & USART_CR3_TXFTIE)
+#elif defined(STM32G0) || defined(STM32WL)
+#define UART_TX_IT_EN(uart) do { (uart)->CR1 |= USART_CR1_TXEIE_TXFNFIE; } while (0)
+#define UART_TX_IT_DIS(uart) do { (uart)->CR1 &= ~USART_CR1_TXEIE_TXFNFIE; } while (0)
+#define UART_TX_IT_IS_EN(uart) ((uart)->CR1 & USART_CR1_TXEIE_TXFNFIE)
+#else
+#define UART_TX_IT_EN(uart) do { (uart)->CR1 |= USART_CR1_TXEIE; } while (0)
+#define UART_TX_IT_DIS(uart) do { (uart)->CR1 &= ~USART_CR1_TXEIE; } while (0)
+#define UART_TX_IT_IS_EN(uart) ((uart)->CR1 & USART_CR1_TXEIE)
+#endif
+
 #if defined(STM32G0) || defined(STM32WL)
 #define USART_CR1_IE_BASE (USART_CR1_PEIE | USART_CR1_TXEIE_TXFNFIE | USART_CR1_TCIE | USART_CR1_RXNEIE_RXFNEIE | USART_CR1_IDLEIE)
 #else
@@ -155,6 +182,31 @@ static const machine_uart_irq_map_t mp_uart_irq_map[] = {
     { USART_CR3_CTSIE,  UART_FLAG_CTS},  // CTS
     #endif
 };
+
+// Move queued characters from the transmit ring into the hardware while it
+// accepts them, and stop the TX interrupt once the ring is empty.  Must be
+// called with the UART IRQ masked or from uart_irq_handler.  Forced inline and
+// free of calls so that uart_irq_handler stays self-contained in RAM when
+// MICROPY_HW_ENABLE_ISR_UART_FLASH_FUNCS_IN_RAM is enabled.
+static inline MP_ALWAYSINLINE void uart_tx_ring_drain(machine_uart_obj_t *self) {
+    USART_TypeDef *uart = self->uartx;
+    uint16_t head = self->tx_buf_head;
+    uint16_t tail = self->tx_buf_tail;
+    while (tail != head && UART_TXE_IS_SET(uart)) {
+        if (self->char_width == CHAR_WIDTH_9BIT) {
+            UART_TX_PUT(uart, ((uint16_t *)self->tx_buf)[tail]);
+        } else {
+            UART_TX_PUT(uart, self->tx_buf[tail]);
+        }
+        if (++tail == self->tx_buf_len) {
+            tail = 0;
+        }
+    }
+    self->tx_buf_tail = tail;
+    if (tail == head) {
+        UART_TX_IT_DIS(uart);
+    }
+}
 
 void uart_init0(void) {
     #if defined(STM32H7)
@@ -744,7 +796,9 @@ bool uart_init(machine_uart_obj_t *uart_obj,
     }
 
     #if defined(STM32H7) || defined(STM32N6)
-    HAL_UARTEx_SetTxFifoThreshold(&huart, UART_TXFIFO_THRESHOLD_1_8);
+    // TXFT is set while 7/8 of the TX FIFO is free, so a buffered write refills
+    // 14 characters per interrupt with 2 still queued.  Unbuffered writes poll.
+    HAL_UARTEx_SetTxFifoThreshold(&huart, UART_TXFIFO_THRESHOLD_7_8);
     HAL_UARTEx_SetRxFifoThreshold(&huart, UART_RXFIFO_THRESHOLD_1_8);
     HAL_UARTEx_EnableFifoMode(&huart);
     #endif
@@ -784,8 +838,25 @@ void uart_set_rxbuf(machine_uart_obj_t *self, size_t len, void *buf) {
     }
 }
 
+// A len of 0 makes writes block until the last character is out, as without
+// a buffer.  Anything still queued in a previous buffer is dropped.
+void uart_set_txbuf(machine_uart_obj_t *self, size_t len, void *buf) {
+    uint32_t irq_state = raise_irq_pri(IRQ_PRI_UART);
+    if (self->tx_buf_len != 0) {
+        UART_TX_IT_DIS(self->uartx);
+    }
+    self->tx_buf_head = 0;
+    self->tx_buf_tail = 0;
+    self->tx_buf = buf;
+    self->tx_buf_len = len;
+    restore_irq_pri(irq_state);
+}
+
 void uart_deinit(machine_uart_obj_t *self) {
     self->is_enabled = false;
+
+    // Detach the transmit ring before its heap memory can be reclaimed.
+    uart_set_txbuf(self, 0, NULL);
 
     // Disable UART
     self->uartx->CR1 &= ~USART_CR1_UE;
@@ -1158,12 +1229,56 @@ int uart_rx_char(machine_uart_obj_t *self) {
     }
 }
 
-// Waits at most timeout milliseconds for TX register to become empty.
+// Number of characters that can be queued in the transmit ring.
+mp_uint_t uart_tx_free(machine_uart_obj_t *self) {
+    int used = self->tx_buf_head - self->tx_buf_tail;
+    if (used < 0) {
+        used += self->tx_buf_len;
+    }
+    return self->tx_buf_len - 1 - used;
+}
+
+// Whether the ring is empty and the last character has left the shift register.
+bool uart_tx_done(machine_uart_obj_t *self) {
+    return self->tx_buf_head == self->tx_buf_tail && UART_TC_IS_SET(self->uartx);
+}
+
+// Drains the ring by polling, so that progress does not depend on the UART IRQ
+// being able to run (caller in a higher-priority IRQ or with IRQs masked).
+static void uart_tx_ring_poll(machine_uart_obj_t *self) {
+    uint32_t irq_state = raise_irq_pri(IRQ_PRI_UART);
+    uart_tx_ring_drain(self);
+    restore_irq_pri(irq_state);
+}
+
+// Waits at most timeout milliseconds for the ring to empty and the last
+// character to be sent.  Returns true if done, false on timeout.
+bool uart_tx_flush(machine_uart_obj_t *self, uint32_t timeout) {
+    uint32_t start = HAL_GetTick();
+    for (;;) {
+        uart_tx_ring_poll(self);
+        if (uart_tx_done(self)) {
+            return true;
+        }
+        if (HAL_GetTick() - start >= timeout) {
+            return false;
+        }
+        MICROPY_EVENT_POLL_HOOK
+    }
+}
+
+// Waits at most timeout milliseconds for room for one character: the TX
+// register, or the transmit ring if there is one.
 // Returns true if can write, false if can't.
 bool uart_tx_wait(machine_uart_obj_t *self, uint32_t timeout) {
     uint32_t start = HAL_GetTick();
     for (;;) {
-        if (uart_tx_avail(self)) {
+        if (self->tx_buf_len != 0) {
+            uart_tx_ring_poll(self);
+            if (uart_tx_free(self) != 0) {
+                return true; // room in the ring
+            }
+        } else if (uart_tx_avail(self)) {
             return true; // tx register is empty
         }
         if (HAL_GetTick() - start >= timeout) {
@@ -1195,10 +1310,78 @@ static bool uart_wait_flag_set(machine_uart_obj_t *self, uint32_t flag, uint32_t
     }
 }
 
+// Characters copied into the ring per masked section, so that a long write
+// holds off the other interrupts only briefly.
+#define UART_TX_CHUNK (64)
+
+// Hands the characters to the hardware FIFO while nothing is queued, then to
+// the ring, and returns without waiting for them to be sent.  With the ring
+// full it waits for room, draining by polling, at most timeout per character.
+static size_t uart_tx_data_buffered(machine_uart_obj_t *self, const uint8_t *src, size_t num_chars, uint32_t timeout, int *errcode) {
+    USART_TypeDef *uart = self->uartx;
+    byte *tx_buf = self->tx_buf;
+    uint16_t tx_buf_len = self->tx_buf_len;
+    bool nine_bit = self->char_width == CHAR_WIDTH_9BIT;
+    size_t num_tx = 0;
+    uint32_t start = HAL_GetTick();
+    for (;;) {
+        size_t num_tx_before = num_tx;
+        size_t chunk_end = MIN(num_chars, num_tx + UART_TX_CHUNK);
+        uint32_t irq_state = raise_irq_pri(IRQ_PRI_UART);
+        uart_tx_ring_drain(self);
+        uint16_t head = self->tx_buf_head;
+        uint16_t tail = self->tx_buf_tail;
+        while (num_tx < chunk_end) {
+            uint32_t data;
+            if (nine_bit) {
+                data = *((uint16_t *)src) & 0x1ff;
+            } else {
+                data = *src;
+            }
+            if (head == tail && UART_TXE_IS_SET(uart)) {
+                UART_TX_PUT(uart, data);
+            } else {
+                uint16_t next_head = head + 1;
+                if (next_head == tx_buf_len) {
+                    next_head = 0;
+                }
+                if (next_head == tail) {
+                    break; // ring full
+                }
+                if (nine_bit) {
+                    ((uint16_t *)tx_buf)[head] = data;
+                } else {
+                    tx_buf[head] = data;
+                }
+                head = next_head;
+            }
+            src += 1 + nine_bit;
+            ++num_tx;
+        }
+        self->tx_buf_head = head;
+        if (head != tail) {
+            UART_TX_IT_EN(uart);
+        }
+        restore_irq_pri(irq_state);
+
+        if (num_tx == num_chars) {
+            *errcode = 0;
+            return num_tx;
+        }
+        if (num_tx != num_tx_before) {
+            start = HAL_GetTick();
+        } else if (HAL_GetTick() - start >= timeout) {
+            *errcode = MP_ETIMEDOUT;
+            return num_tx;
+        }
+    }
+}
+
 // src - a pointer to the data to send (16-bit aligned for 9-bit chars)
 // num_chars - number of characters to send (9-bit chars count for 2 bytes from src)
 // *errcode - returns 0 for success, MP_Exxx on error
-// returns the number of characters sent (valid even if there was an error)
+// returns the number of characters sent (valid even if there was an error);
+// with a transmit ring, the number queued or handed to the hardware
 size_t uart_tx_data(machine_uart_obj_t *self, const void *src_in, size_t num_chars, int *errcode) {
     if (num_chars == 0) {
         *errcode = 0;
@@ -1225,6 +1408,10 @@ size_t uart_tx_data(machine_uart_obj_t *self, const void *src_in, size_t num_cha
     #endif
 
     const uint8_t *src = (const uint8_t *)src_in;
+    if (self->tx_buf_len != 0) {
+        return uart_tx_data_buffered(self, src, num_chars, timeout, errcode);
+    }
+
     size_t num_tx = 0;
     USART_TypeDef *uart = self->uartx;
 
@@ -1258,12 +1445,32 @@ size_t uart_tx_data(machine_uart_obj_t *self, const void *src_in, size_t num_cha
     return num_tx;
 }
 
+// Whether the UART interrupt may be unable to run in the calling context: an
+// exception handler (a fault dump, or an IRQ at or above UART priority) or
+// interrupts masked.
+static bool uart_tx_irq_maybe_blocked(void) {
+    #if __CORTEX_M >= 3
+    if (__get_BASEPRI() != 0) {
+        return true;
+    }
+    #endif
+    return __get_IPSR() != 0 || __get_PRIMASK() != 0;
+}
+
 void uart_tx_strn(machine_uart_obj_t *uart_obj, const char *str, uint len) {
     int errcode;
     uart_tx_data(uart_obj, str, len, &errcode);
+    if (uart_obj->tx_buf_len != 0 && uart_tx_irq_maybe_blocked()) {
+        // Console output that may be the last before a fatal-error loop or a
+        // reset: send it all now instead of leaving it in the ring.
+        while (uart_obj->tx_buf_head != uart_obj->tx_buf_tail) {
+            uart_tx_ring_poll(uart_obj);
+        }
+    }
 }
 
-// This IRQ handler is set up to handle RXNE, IDLE and ORE interrupts only.
+// This IRQ handler is set up to handle RXNE, IDLE and ORE interrupts, and the
+// TX interrupt that drains the transmit ring.
 // Notes:
 // - ORE (overrun error) is tied to the RXNE IRQ line.
 // - On STM32F4 the IRQ flags are cleared by reading SR then DR.
@@ -1319,6 +1526,10 @@ void uart_irq_handler(mp_uint_t uart_id) {
             // No buffering, disable interrupt.
             UART_RXNE_IT_DIS(self->uartx);
         }
+    }
+
+    if (self->tx_buf_len != 0 && UART_TX_IT_IS_EN(self->uartx)) {
+        uart_tx_ring_drain(self);
     }
 
     // Clear other interrupt flags that can trigger this IRQ handler.

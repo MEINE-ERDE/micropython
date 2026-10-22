@@ -131,6 +131,9 @@ static void mp_machine_uart_print(const mp_print_t *print, mp_obj_t self_in, mp_
         mp_printf(print, ", timeout=%u, timeout_char=%u, rxbuf=%u",
             self->timeout, self->timeout_char,
             self->read_buf_len == 0 ? 0 : self->read_buf_len - 1); // -1 to adjust for usable length of buffer
+        if (self->tx_buf_len != 0) {
+            mp_printf(print, ", txbuf=%u", self->tx_buf_len - 1);
+        }
         if (self->mp_irq_trigger != 0) {
             mp_printf(print, "; irq=0x%x", self->mp_irq_trigger);
         }
@@ -154,7 +157,7 @@ static void mp_machine_uart_print(const mp_print_t *print, mp_obj_t self_in, mp_
     }
 }
 
-/// \method init(baudrate, bits=8, parity=None, stop=1, *, timeout=1000, timeout_char=0, flow=0, read_buf_len=64, invert=0)
+/// \method init(baudrate, bits=8, parity=None, stop=1, *, timeout=1000, timeout_char=0, flow=0, read_buf_len=64, txbuf=0, invert=0)
 ///
 /// Initialise the UART bus with the given parameters:
 ///
@@ -166,6 +169,7 @@ static void mp_machine_uart_print(const mp_print_t *print, mp_obj_t self_in, mp_
 ///   - `timeout_char` is the timeout in milliseconds to wait between characters.
 ///   - `flow` is RTS | CTS where RTS == 256, CTS == 512
 ///   - `read_buf_len` is the character length of the read buffer (0 to disable).
+///   - `txbuf` is the character length of the transmit buffer (0 to disable).
 ///   - `invert` specifies which lines to invert. INV_TX | INV_RX (0 to disable). --> Only for STM32H7
 static void mp_machine_uart_init_helper(machine_uart_obj_t *self, size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
     static const mp_arg_t allowed_args[] = {
@@ -178,6 +182,7 @@ static void mp_machine_uart_init_helper(machine_uart_obj_t *self, size_t n_args,
         { MP_QSTR_timeout_char, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 0} },
         { MP_QSTR_rxbuf, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = -1} },
         { MP_QSTR_read_buf_len, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 64} }, // legacy
+        { MP_QSTR_txbuf, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = -1} },
         #if defined(STM32H7)
         { MP_QSTR_invert, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 0} },
         #endif
@@ -185,7 +190,7 @@ static void mp_machine_uart_init_helper(machine_uart_obj_t *self, size_t n_args,
 
     // parse args
     struct {
-        mp_arg_val_t baudrate, bits, parity, stop, flow, timeout, timeout_char, rxbuf, read_buf_len;
+        mp_arg_val_t baudrate, bits, parity, stop, flow, timeout, timeout_char, rxbuf, read_buf_len, txbuf;
         #if defined(STM32H7)
         mp_arg_val_t invert;
         #endif
@@ -241,8 +246,22 @@ static void mp_machine_uart_init_helper(machine_uart_obj_t *self, size_t n_args,
     uint32_t invert = 0;
     #endif
 
+    if (args.txbuf.u_int > 0xfffe) {
+        mp_raise_ValueError(MP_ERROR_TEXT("txbuf too large"));
+    }
+    if (self->is_static && self->tx_buf_len != 0 && bits == UART_WORDLENGTH_9B && parity == UART_PARITY_NONE) {
+        // The static transmit buffer holds bytes, not 9-bit characters.
+        mp_raise_ValueError(MP_ERROR_TEXT("UART is static and txbuf is 8-bit only"));
+    }
+
     // Save attach_to_repl setting because uart_init will disable it.
     bool attach_to_repl = self->attached_to_repl;
+
+    // Detach the transmit buffer so the IRQ leaves it alone while the
+    // peripheral is reconfigured; anything still queued is dropped.
+    byte *old_tx_buf = self->tx_buf;
+    size_t old_tx_buf_len = self->tx_buf_len;
+    uart_set_txbuf(self, 0, NULL);
 
     // init UART (if it fails, it's because the port doesn't exist)
     if (!uart_init(self, baudrate, bits, parity, stop, flow, invert)) {
@@ -266,8 +285,12 @@ static void mp_machine_uart_init_helper(machine_uart_obj_t *self, size_t n_args,
 
     if (self->is_static) {
         // Static UARTs have fixed memory for the rxbuf and can't be reconfigured.
+        uart_set_txbuf(self, old_tx_buf_len, old_tx_buf);
         if (args.rxbuf.u_int >= 0) {
             mp_raise_ValueError(MP_ERROR_TEXT("UART is static and rxbuf can't be changed"));
+        }
+        if (args.txbuf.u_int >= 0) {
+            mp_raise_ValueError(MP_ERROR_TEXT("UART is static and txbuf can't be changed"));
         }
         uart_set_rxbuf(self, self->read_buf_len, self->read_buf);
     } else {
@@ -285,6 +308,15 @@ static void mp_machine_uart_init_helper(machine_uart_obj_t *self, size_t n_args,
             size_t len = args.read_buf_len.u_int + 1; // +1 to adjust for usable length of buffer
             uint8_t *buf = m_new(byte, len << self->char_width);
             uart_set_rxbuf(self, len, buf);
+        }
+
+        // setup the transmit buffer
+        m_del(byte, old_tx_buf, old_tx_buf_len << self->char_width);
+        if (args.txbuf.u_int > 0) {
+            // transmit buffer drained by interrupts
+            size_t len = args.txbuf.u_int + 1; // +1 to adjust for usable length of buffer
+            uint8_t *buf = m_new(byte, len << self->char_width);
+            uart_set_txbuf(self, len, buf);
         }
     }
 
@@ -430,14 +462,23 @@ static mp_int_t mp_machine_uart_any(machine_uart_obj_t *self) {
     return uart_rx_any(self);
 }
 
-// Since uart.write() waits up to the last byte, uart.txdone() always returns True.
+// Without a transmit buffer uart.write() waits up to the last byte, so
+// uart.txdone() always returns True.
 static bool mp_machine_uart_txdone(machine_uart_obj_t *self) {
-    (void)self;
-    return true;
+    return self->tx_buf_len == 0 || uart_tx_done(self);
+}
+
+// Upper bound for sending the transmit buffer and the hardware FIFO.
+static uint32_t mp_machine_uart_flush_timeout(machine_uart_obj_t *self) {
+    uint64_t timeout = self->timeout + (uint64_t)(self->tx_buf_len + 16) * self->timeout_char;
+    return MIN(timeout, UINT32_MAX);
 }
 
 // Send a break condition.
 static void mp_machine_uart_sendbreak(machine_uart_obj_t *self) {
+    if (self->tx_buf_len != 0 && !uart_tx_flush(self, mp_machine_uart_flush_timeout(self))) {
+        mp_raise_OSError(MP_ETIMEDOUT);
+    }
     #if defined(STM32F0) || defined(STM32F7) || defined(STM32G0) || defined(STM32G4) || defined(STM32H5) || defined(STM32H7) || defined(STM32L0) || defined(STM32L4) || defined(STM32N6) || defined(STM32U5) || defined(STM32WB) || defined(STM32WL)
     self->uartx->RQR = USART_RQR_SBKRQ; // write-only register
     #else
@@ -582,12 +623,18 @@ static mp_uint_t mp_machine_uart_ioctl(mp_obj_t self_in, mp_uint_t request, uint
         if ((flags & MP_STREAM_POLL_RD) && uart_rx_any(self)) {
             ret |= MP_STREAM_POLL_RD;
         }
-        if ((flags & MP_STREAM_POLL_WR) && uart_tx_avail(self)) {
+        if ((flags & MP_STREAM_POLL_WR)
+            && (self->tx_buf_len != 0 ? uart_tx_free(self) != 0 : uart_tx_avail(self))) {
             ret |= MP_STREAM_POLL_WR;
         }
     } else if (request == MP_STREAM_FLUSH) {
-        // Since uart.write() waits up to the last byte, uart.flush() always succeeds.
+        // Without a transmit buffer uart.write() waits up to the last byte, so
+        // uart.flush() always succeeds.
         ret = 0;
+        if (self->tx_buf_len != 0 && !uart_tx_flush(self, mp_machine_uart_flush_timeout(self))) {
+            *errcode = MP_ETIMEDOUT;
+            ret = MP_STREAM_ERROR;
+        }
     } else {
         *errcode = MP_EINVAL;
         ret = MP_STREAM_ERROR;

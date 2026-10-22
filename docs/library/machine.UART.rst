@@ -147,6 +147,18 @@ Methods
 
    Return value: number of bytes written or ``None`` on timeout.
 
+   .. note::
+
+       On the stm32 port a UART initialised with *txbuf* greater than 0 copies the
+       data into the transmit buffer and returns before the last stop bit has been
+       sent; without *txbuf* (the default) it returns after the last stop bit. When
+       the buffer is full, ``write`` waits for room as long as characters keep being
+       sent, and returns the number queued so far when none could be sent within the
+       per-character timeout derived from *timeout_char*. Call ``flush()`` before
+       ``init()``, ``deinit()``, a baudrate change, ``machine.reset()``, a low-power
+       mode or switching an RS-485 direction pin, since those cut off whatever is
+       still queued.
+
 .. method:: UART.sendbreak()
 
    Send a break condition on the bus. This drives the bus low for a duration

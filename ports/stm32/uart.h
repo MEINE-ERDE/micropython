@@ -56,7 +56,7 @@ typedef enum {
 #define MP_UART_ALLOWED_FLAGS (UART_FLAG_IDLE | UART_FLAG_RXNE)
 
 // OR-ed IRQ flags which should not be touched by the user
-#define MP_UART_RESERVED_FLAGS UART_FLAG_RXNE
+#define MP_UART_RESERVED_FLAGS (UART_FLAG_RXNE | UART_FLAG_TXE)
 
 typedef struct _machine_uart_obj_t {
     mp_obj_base_t base;
@@ -76,6 +76,10 @@ typedef struct _machine_uart_obj_t {
     volatile uint16_t read_buf_head;    // indexes first empty slot
     uint16_t read_buf_tail;             // indexes first full slot (not full if equals head)
     byte *read_buf;                     // byte or uint16_t, depending on char size
+    uint16_t tx_buf_len;                // len in chars; buf can hold len-1 chars; 0 if unbuffered
+    volatile uint16_t tx_buf_head;      // indexes first empty slot
+    volatile uint16_t tx_buf_tail;      // indexes first full slot (empty if equals head)
+    byte *tx_buf;                       // byte or uint16_t, depending on char size
     uint16_t mp_irq_trigger;            // user IRQ trigger mask
     uint16_t mp_irq_flags;              // user IRQ active IRQ flags
     mp_irq_obj_t *mp_irq_obj;           // user IRQ object
@@ -90,6 +94,7 @@ bool uart_init(machine_uart_obj_t *uart_obj,
     uint32_t baudrate, uint32_t bits, uint32_t parity, uint32_t stop, uint32_t flow, uint32_t invert);
 void uart_irq_config(machine_uart_obj_t *self, bool enable);
 void uart_set_rxbuf(machine_uart_obj_t *self, size_t len, void *buf);
+void uart_set_txbuf(machine_uart_obj_t *self, size_t len, void *buf);
 void uart_deinit(machine_uart_obj_t *uart_obj);
 void uart_irq_handler(mp_uint_t uart_id);
 
@@ -102,6 +107,9 @@ mp_uint_t uart_rx_any(machine_uart_obj_t *uart_obj);
 bool uart_rx_wait(machine_uart_obj_t *self, uint32_t timeout);
 int uart_rx_char(machine_uart_obj_t *uart_obj);
 bool uart_tx_wait(machine_uart_obj_t *self, uint32_t timeout);
+mp_uint_t uart_tx_free(machine_uart_obj_t *self);
+bool uart_tx_done(machine_uart_obj_t *self);
+bool uart_tx_flush(machine_uart_obj_t *self, uint32_t timeout);
 size_t uart_tx_data(machine_uart_obj_t *self, const void *src_in, size_t num_chars, int *errcode);
 void uart_tx_strn(machine_uart_obj_t *uart_obj, const char *str, uint len);
 

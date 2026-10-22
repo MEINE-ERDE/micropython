@@ -101,8 +101,18 @@ static pyb_thread_t pyb_thread_main;
 #ifndef MICROPY_HW_UART_REPL_RXBUF
 #define MICROPY_HW_UART_REPL_RXBUF (260)
 #endif
+// A transmit buffer for the REPL UART, in bytes; 0 keeps it unbuffered.  Not
+// enabled on any board: output written from a fault handler or with
+// interrupts masked is sent before uart_tx_strn returns, but anything still
+// queued when the board resets (machine.reset, the watchdog) is lost.
+#ifndef MICROPY_HW_UART_REPL_TXBUF
+#define MICROPY_HW_UART_REPL_TXBUF (0)
+#endif
 static machine_uart_obj_t pyb_uart_repl_obj;
 static uint8_t pyb_uart_repl_rxbuf[MICROPY_HW_UART_REPL_RXBUF];
+#if MICROPY_HW_UART_REPL_TXBUF
+static uint8_t pyb_uart_repl_txbuf[MICROPY_HW_UART_REPL_TXBUF];
+#endif
 #endif
 
 void nlr_jump_fail(void *val) {
@@ -510,6 +520,9 @@ void stm32_main(uint32_t reset_mode) {
     pyb_uart_repl_obj.timeout_char = 2;
     uart_init(&pyb_uart_repl_obj, MICROPY_HW_UART_REPL_BAUD, UART_WORDLENGTH_8B, UART_PARITY_NONE, UART_STOPBITS_1, 0, 0);
     uart_set_rxbuf(&pyb_uart_repl_obj, sizeof(pyb_uart_repl_rxbuf), pyb_uart_repl_rxbuf);
+    #if MICROPY_HW_UART_REPL_TXBUF
+    uart_set_txbuf(&pyb_uart_repl_obj, sizeof(pyb_uart_repl_txbuf), pyb_uart_repl_txbuf);
+    #endif
     uart_attach_to_repl(&pyb_uart_repl_obj, true);
     MP_STATE_PORT(machine_uart_obj_all)[MICROPY_HW_UART_REPL - 1] = &pyb_uart_repl_obj;
     MP_STATE_PORT(pyb_stdio_uart) = &pyb_uart_repl_obj;
